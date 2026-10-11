@@ -1,21 +1,11 @@
 "use client";
 
 import Decimal from "decimal.js";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { Download, MoreHorizontal, Plus, Receipt, Search } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
+import { PaymentEntryDialog, type PaymentEntryValues } from "@/components/payment-entry-dialog";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { formatBdt, formatUsd } from "@/lib/money";
 import { METHOD_LABELS, PAYMENT_METHODS, paymentFieldsSchema } from "@/lib/validations/payment";
 
@@ -92,17 +82,6 @@ const ranges = {
   },
 };
 
-const previewBdt = (amountUsd: string, rateBdt: string) => {
-  try {
-    const amount = new Decimal(amountUsd);
-    const rate = new Decimal(rateBdt);
-    if (!amount.gt(0) || !rate.gt(0)) return "—";
-    return bdt(amount.toDecimalPlaces(2).mul(rate.toDecimalPlaces(2)).toDecimalPlaces(2).toFixed(2));
-  } catch {
-    return "—";
-  }
-};
-
 const readError = async (response: Response) => {
   const payload = (await response.json().catch(() => null)) as { error?: string } | null;
   return payload?.error || "Request failed";
@@ -119,14 +98,15 @@ export function PaymentsManager() {
   const [sortBy, setSortBy] = useState("paymentDate");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(10);
+  const [rangeKey, setRangeKey] = useState<"all" | "today" | "week" | "month" | "year" | "custom">("all");
+  const [rowMenu, setRowMenu] = useState<string | null>(null);
   const [data, setData] = useState<ListData | null>(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<string[]>([]);
   const [dialog, setDialog] = useState<"create" | PaymentRow | null>(null);
   const [pending, setPending] = useState(false);
   const [formError, setFormError] = useState("");
-  const [draftUsd, setDraftUsd] = useState("");
-  const [draftRate, setDraftRate] = useState("");
 
   useEffect(() => {
     void fetch("/api/admin/users?limit=50&status=all")
@@ -142,7 +122,7 @@ export function PaymentsManager() {
       status,
       search: submittedSearch,
       page: String(page),
-      limit: "8",
+      limit: String(limit),
       sortBy,
       sortDir,
     });
@@ -158,7 +138,7 @@ export function PaymentsManager() {
     setData(payload.data);
     setSelected([]);
     setLoading(false);
-  }, [dateFrom, dateTo, page, sortBy, sortDir, status, submittedSearch, userId]);
+  }, [dateFrom, dateTo, limit, page, sortBy, sortDir, status, submittedSearch, userId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -169,15 +149,11 @@ export function PaymentsManager() {
 
   const openCreate = () => {
     setFormError("");
-    setDraftUsd("");
-    setDraftRate("");
     setDialog("create");
   };
 
   const openEdit = (payment: PaymentRow) => {
     setFormError("");
-    setDraftUsd(String(payment.amountUsd));
-    setDraftRate(String(payment.rateBdt));
     setDialog(payment);
   };
 
@@ -186,18 +162,9 @@ export function PaymentsManager() {
     setFormError("");
   };
 
-  const submitPayment = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
+  const submitPayment = async (values: PaymentEntryValues) => {
     const editing = dialog !== "create" && dialog !== null ? dialog : null;
-    const parsed = paymentFieldsSchema.safeParse({
-      userId: form.get("userId"),
-      method: form.get("method"),
-      amountUsd: form.get("amountUsd"),
-      rateBdt: form.get("rateBdt"),
-      paymentDate: form.get("paymentDate"),
-      note: form.get("note") ?? "",
-    });
+    const parsed = paymentFieldsSchema.safeParse(values);
     if (!parsed.success) {
       setFormError(parsed.error.issues[0]?.message ?? "Check the form");
       return;
@@ -258,367 +225,251 @@ export function PaymentsManager() {
 
   const applyRange = (key: keyof typeof ranges) => {
     const range = ranges[key]();
+    setRangeKey(key === "7d" || key === "30d" ? "custom" : key);
     setDateFrom(range.from.toISOString());
     setDateTo(range.to.toISOString());
     setPage(1);
   };
 
+  const clearRange = () => {
+    setRangeKey("all");
+    setDateFrom("");
+    setDateTo("");
+    setPage(1);
+  };
+
+  const exportCsv = async () => {
+    const params = new URLSearchParams({ type: "payments", format: "csv", status, userId });
+    if (dateFrom) params.set("from", dateFrom.slice(0, 10));
+    if (dateTo) params.set("to", dateTo.slice(0, 10));
+    const response = await fetch(`/api/reports/export?${params.toString()}`);
+    if (!response.ok) {
+      toast.error(await readError(response));
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "payments-ledger.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const bulkUnpaid = async () => {
+    const results = await Promise.all(selected.map((id) => fetch(`/api/payments/${id}/mark-unpaid`, { method: "POST" })));
+    const failed = results.filter((response) => !response.ok).length;
+    if (failed) toast.error(`${failed} payment${failed === 1 ? "" : "s"} could not be marked unpaid`);
+    else toast.success(`Marked ${selected.length} payment${selected.length === 1 ? "" : "s"} as unpaid`);
+    await load();
+  };
+
   const pageIds = data?.payments.map((payment) => payment.id) ?? [];
   const allSelected = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
   const editing = dialog && dialog !== "create" ? dialog : null;
-  const lockedMoney = editing?.status === "paid";
-  const totals = data?.totals;
-  const footer = useMemo(() => totals, [totals]);
+  const footer = data?.totals;
+  const selectedRows = data?.payments.filter((payment) => selected.includes(payment.id)) ?? [];
+  const selectedUsd = selectedRows.reduce((sum, payment) => sum.plus(payment.amountUsd || 0), new Decimal(0));
+  const selectedBdt = selectedRows.reduce((sum, payment) => sum.plus(payment.amountBdt || 0), new Decimal(0));
+  const paidShare = footer && new Decimal(footer.totalBdt || 0).gt(0) ? new Decimal(footer.paidBdt || 0).div(footer.totalBdt).mul(100).toFixed(1) : "0.0";
+  const unpaidShare = footer && new Decimal(footer.totalBdt || 0).gt(0) ? new Decimal(footer.unpaidBdt || 0).div(footer.totalBdt).mul(100).toFixed(1) : "0.0";
+  const startRow = data && data.total > 0 ? (page - 1) * limit + 1 : 0;
+  const endRow = data ? Math.min(page * limit, data.total) : 0;
+  const rangeLabel = dateFrom && dateTo ? `${new Date(dateFrom).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} – ${new Date(dateTo).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}` : "All dates";
+  const initials = (name: string) => name.split(" ").filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("") || "U";
+
+  const sortHeader = (key: string) => {
+    if (!["paymentDate", "amountUsd", "amountBdt", "status"].includes(key)) return;
+    setSortDir(sortBy === key && sortDir === "desc" ? "asc" : "desc");
+    setSortBy(key);
+    setPage(1);
+  };
 
   return (
-    <section className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Payments</h1>
-          <p className="mt-1 text-sm text-muted-foreground">BDT is calculated on the server from the USD amount and that payment’s rate.</p>
+    <div className="-mx-4 -my-6 min-h-full bg-[#faf8ff] px-4 py-6 text-[#131b2e] md:-mx-8 md:-my-8 md:px-8">
+      <div className="mx-auto flex w-full max-w-[1720px] flex-col gap-5">
+        <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
+          <div>
+            <p className="text-[12px] font-semibold tracking-wide text-[#464555] uppercase">
+              Treasury & settlements <span className="text-[#006e2d]">• Real-time core ledger</span>
+            </p>
+            <h1 className="mt-1 text-[32px] font-bold tracking-tight">Payments Ledger</h1>
+            <p className="mt-1 max-w-2xl text-[13px] text-[#464555]">Institutional settlement records, cross-border clearance, and multi-currency payout reconciliation.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="inline-flex items-center gap-1.5 rounded-lg bg-[#eaedff] px-3 py-2 text-[13px] font-medium hover:bg-[#e2e7ff]" onClick={() => void exportCsv()}>
+              <Download className="size-4" /> Export CSV
+            </button>
+            <button type="button" className="inline-flex items-center gap-1.5 rounded-lg bg-[#4f46e5] px-4 py-2 text-[13px] font-medium text-white hover:bg-[#3525cd]" onClick={openCreate}>
+              <Plus className="size-4" /> Add Payment
+            </button>
+          </div>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" disabled={selected.length === 0} onClick={bulkPaid}>
-            Mark selected as paid
-          </Button>
-          <Button onClick={openCreate}>Add payment</Button>
-        </div>
+
+        <form
+          className="flex flex-col gap-3 rounded-xl bg-white p-3 shadow-sm"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setPage(1);
+            setSubmittedSearch(search.trim());
+          }}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="relative min-w-48 flex-1">
+              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#464555]" />
+              <input aria-label="Search payments" value={search} placeholder="Search note or user" className="h-10 w-full rounded-lg bg-[#eaedff] pr-3 pl-9 text-[13px] outline-none" onChange={(event) => setSearch(event.target.value)} />
+            </label>
+            <select aria-label="User" value={userId} className="h-10 rounded-lg bg-[#eaedff] px-3 text-[13px]" onChange={(event) => { setUserId(event.target.value); setPage(1); }}>
+              <option value="">All users</option>
+              {users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
+            </select>
+            <select aria-label="Status" value={status} className="h-10 rounded-lg bg-[#eaedff] px-3 text-[13px]" onChange={(event) => { setStatus(event.target.value as "all" | "paid" | "unpaid"); setPage(1); }}>
+              <option value="all">All statuses</option>
+              <option value="paid">Paid</option>
+              <option value="unpaid">Unpaid</option>
+            </select>
+            <span className="rounded-lg bg-[#eaedff] px-3 py-2 text-[13px] text-[#464555]">{rangeLabel}</span>
+            <button type="submit" className="rounded-lg bg-[#3525cd] px-3 py-2 text-[13px] font-medium text-white">Search</button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {([
+              ["all", "All time"],
+              ["today", "Today"],
+              ["week", "This week"],
+              ["month", "This month"],
+              ["year", "This year"],
+            ] as const).map(([key, label]) => (
+              <button key={key} type="button" className={`rounded-full px-3 py-1 text-[12px] font-semibold ${rangeKey === key ? "bg-[#3525cd] text-white" : "bg-[#eaedff] text-[#464555]"}`} onClick={() => (key === "all" ? clearRange() : applyRange(key))}>
+                {label}
+              </button>
+            ))}
+            <input aria-label="From" type="date" value={dateFrom ? dayValue(dateFrom) : ""} className="h-9 rounded-lg bg-[#eaedff] px-2 text-[13px]" onChange={(event) => { setRangeKey("custom"); setDateFrom(event.target.value ? startOfDay(new Date(`${event.target.value}T12:00:00`)).toISOString() : ""); setPage(1); }} />
+            <input aria-label="To" type="date" value={dateTo ? dayValue(dateTo) : ""} className="h-9 rounded-lg bg-[#eaedff] px-2 text-[13px]" onChange={(event) => { setRangeKey("custom"); setDateTo(event.target.value ? endOfDay(new Date(`${event.target.value}T12:00:00`)).toISOString() : ""); setPage(1); }} />
+          </div>
+        </form>
+
+        <section className="overflow-hidden rounded-xl bg-white shadow-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1100px] text-left text-[13px]">
+              <thead className="text-[11px] tracking-wide text-[#464555] uppercase">
+                <tr className="border-b border-[#eeeaf4]">
+                  <th className="px-4 py-3">
+                    <input type="checkbox" aria-label="Select all payments on this page" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? pageIds : [])} />
+                  </th>
+                  {([
+                    ["userName", "Counterparty"],
+                    ["paymentDate", "Txn & date"],
+                    ["amountUsd", "USD amount"],
+                    ["rate", "FX rate"],
+                    ["amountBdt", "BDT settlement"],
+                    ["status", "Status"],
+                  ] as const).map(([key, label]) => (
+                    <th key={key} className="px-4 py-3 font-semibold">
+                      <button type="button" className="font-semibold" onClick={() => { if (key === "paymentDate" || key === "amountUsd" || key === "amountBdt" || key === "status") sortHeader(key); }}>{label}{sortBy === key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}</button>
+                    </th>
+                  ))}
+                  <th className="px-4 py-3 font-semibold">Paid by</th>
+                  <th className="px-4 py-3 font-semibold">Paid at</th>
+                  <th className="px-4 py-3 text-right font-semibold">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && <tr><td colSpan={10} className="px-4 py-8 text-[#464555]">Loading payments...</td></tr>}
+                {!loading && data?.payments.length === 0 && <tr><td colSpan={10} className="px-4 py-8 text-[#464555]">No payments match these filters.</td></tr>}
+                {!loading && data?.payments.map((payment) => (
+                  <tr key={payment.id} className="border-b border-[#f3f0f6]">
+                    <td className="px-4 py-3">
+                      <input type="checkbox" aria-label={`Select payment for ${payment.userName}`} checked={selected.includes(payment.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, payment.id] : current.filter((id) => id !== payment.id))} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="inline-flex items-center gap-2">
+                        <span className="flex size-9 items-center justify-center rounded-lg bg-[#e2e7ff] text-[12px] font-bold text-[#3525cd]">{initials(payment.userName)}</span>
+                        <span>
+                          <span className="block font-medium">{payment.userName}</span>
+                          <span className="text-[11px] text-[#464555]">US-BD • {METHOD_LABELS[payment.method]}</span>
+                        </span>
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="block font-medium">TXN-{payment.id.slice(-6).toUpperCase()}</span>
+                      <span className="text-[11px] text-[#464555]">{new Date(payment.paymentDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
+                    </td>
+                    <td className="px-4 py-3 font-medium tabular-nums">{usd(payment.amountUsd)}</td>
+                    <td className="px-4 py-3 tabular-nums">৳{new Decimal(payment.rateBdt || 0).toFixed(2)}</td>
+                    <td className="px-4 py-3 tabular-nums">{bdt(payment.amountBdt)}</td>
+                    <td className="px-4 py-3">
+                      <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase ${payment.status === "paid" ? "bg-[#7cf994]/40 text-[#006e2d]" : "bg-[#ffddb8] text-[#684000]"}`}>
+                        {payment.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">{payment.paidByName ?? "—"}</td>
+                    <td className="px-4 py-3 text-[#464555]">{payment.paidAt ? when(payment.paidAt) : "Awaiting dispatch"}</td>
+                    <td className="relative px-4 py-3 text-right">
+                      <button type="button" aria-label="Payment note" className="rounded p-1 text-[#464555] hover:bg-[#eaedff]" onClick={() => toast.message(payment.note || "No settlement note")}>
+                        <Receipt className="size-4" />
+                      </button>
+                      <button type="button" aria-label="Row actions" className="rounded p-1 text-[#464555] hover:bg-[#eaedff]" onClick={() => setRowMenu(rowMenu === payment.id ? null : payment.id)}>
+                        <MoreHorizontal className="size-4" />
+                      </button>
+                      {rowMenu === payment.id && (
+                        <div className="absolute right-4 z-20 mt-1 w-40 rounded-xl bg-white p-1 text-left text-[13px] shadow-xl">
+                          <button type="button" className="block w-full rounded-lg px-3 py-2 text-left hover:bg-[#faf8ff]" onClick={() => { setRowMenu(null); openEdit(payment); }}>Edit entry</button>
+                          <button type="button" className="block w-full rounded-lg px-3 py-2 text-left hover:bg-[#faf8ff]" onClick={() => { setRowMenu(null); void mark(payment.id, payment.status !== "paid"); }}>{payment.status === "paid" ? "Mark unpaid" : "Mark paid"}</button>
+                          <button type="button" className="block w-full rounded-lg px-3 py-2 text-left text-[#684000] hover:bg-[#fff4e8]" onClick={() => { setRowMenu(null); void remove(payment); }}>Delete record</button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="grid gap-3 border-t border-[#eeeaf4] bg-[#faf8ff] px-4 py-4 text-[12px] sm:grid-cols-2 xl:grid-cols-5">
+            <p><span className="block text-[11px] font-semibold tracking-wide text-[#464555] uppercase">Filtered scope</span><span className="text-base font-semibold">{data?.total ?? 0} records</span></p>
+            <p><span className="block text-[11px] font-semibold tracking-wide text-[#464555] uppercase">USD grand total</span><span className="text-base font-semibold tabular-nums">{footer ? usd(footer.totalUsd) : "—"}</span></p>
+            <p><span className="block text-[11px] font-semibold tracking-wide text-[#464555] uppercase">BDT settlement total</span><span className="text-base font-semibold tabular-nums">{footer ? bdt(footer.totalBdt) : "—"}</span></p>
+            <p><span className="block text-[11px] font-semibold tracking-wide text-[#006e2d] uppercase">Paid ({paidShare}%)</span><span className="text-base font-semibold text-[#006e2d] tabular-nums">{footer ? bdt(footer.paidBdt) : "—"}</span></p>
+            <p><span className="block text-[11px] font-semibold tracking-wide text-[#684000] uppercase">Unpaid ({unpaidShare}%)</span><span className="text-base font-semibold text-[#684000] tabular-nums">{footer ? bdt(footer.unpaidBdt) : "—"}</span></p>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-[13px] text-[#464555]">
+            <p>Showing {startRow} to {endRow} of {data?.total ?? 0} payments</p>
+            <div className="flex items-center gap-2">
+              <label className="text-[12px]">
+                Per page
+                <select aria-label="Rows per page" className="ml-2 h-8 rounded-lg bg-[#eaedff] px-2" value={limit} onChange={(event) => { setLimit(Number(event.target.value)); setPage(1); }}>
+                  {[10, 25, 50].map((size) => <option key={size} value={size}>{size}</option>)}
+                </select>
+              </label>
+              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>Prev</Button>
+              <span>Page {data?.page ?? page} of {data?.totalPages ?? 1}</span>
+              <Button variant="outline" size="sm" disabled={!data || page >= data.totalPages} onClick={() => setPage((current) => current + 1)}>Next</Button>
+            </div>
+          </div>
+        </section>
       </div>
 
-      <form
-        className="flex flex-wrap items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setPage(1);
-          setSubmittedSearch(search.trim());
-        }}
-      >
-        <select
-          aria-label="User"
-          value={userId}
-          className="h-8 rounded-lg border bg-background px-2 text-sm"
-          onChange={(event) => {
-            setUserId(event.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">All users</option>
-          {users.map((user) => (
-            <option key={user.id} value={user.id}>
-              {user.name}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Status"
-          value={status}
-          className="h-8 rounded-lg border bg-background px-2 text-sm"
-          onChange={(event) => {
-            setStatus(event.target.value as "all" | "paid" | "unpaid");
-            setPage(1);
-          }}
-        >
-          <option value="all">All statuses</option>
-          <option value="paid">Paid</option>
-          <option value="unpaid">Unpaid</option>
-        </select>
-        <Input
-          type="date"
-          aria-label="From"
-          value={dateFrom ? dayValue(dateFrom) : ""}
-          onChange={(event) => {
-            setDateFrom(event.target.value ? startOfDay(new Date(`${event.target.value}T12:00:00`)).toISOString() : "");
-            setPage(1);
-          }}
-          className="w-40"
-        />
-        <Input
-          type="date"
-          aria-label="To"
-          value={dateTo ? dayValue(dateTo) : ""}
-          onChange={(event) => {
-            setDateTo(event.target.value ? endOfDay(new Date(`${event.target.value}T12:00:00`)).toISOString() : "");
-            setPage(1);
-          }}
-          className="w-40"
-        />
-        <Input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search note or user"
-          aria-label="Search payments"
-          className="w-48"
-        />
-        <select
-          aria-label="Sort"
-          value={sortBy}
-          className="h-8 rounded-lg border bg-background px-2 text-sm"
-          onChange={(event) => setSortBy(event.target.value)}
-        >
-          <option value="paymentDate">Date</option>
-          <option value="amountUsd">USD</option>
-          <option value="amountBdt">BDT</option>
-          <option value="status">Status</option>
-        </select>
-        <Button type="submit" variant="outline">
-          Search
-        </Button>
-        <Button type="button" variant="ghost" onClick={() => applyRange("7d")}>
-          7D
-        </Button>
-        <Button type="button" variant="ghost" onClick={() => applyRange("30d")}>
-          30D
-        </Button>
-        <Button type="button" variant="ghost" onClick={() => applyRange("today")}>
-          Today
-        </Button>
-        <Button type="button" variant="ghost" onClick={() => applyRange("week")}>
-          This week
-        </Button>
-        <Button type="button" variant="ghost" onClick={() => applyRange("month")}>
-          This month
-        </Button>
-        <Button type="button" variant="ghost" onClick={() => applyRange("year")}>
-          This year
-        </Button>
-      </form>
-
-      <div className="rounded-xl border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-10">
-                <input
-                  type="checkbox"
-                  aria-label="Select all payments on this page"
-                  checked={allSelected}
-                  onChange={(event) => setSelected(event.target.checked ? pageIds : [])}
-                />
-              </TableHead>
-              {(
-                [
-                  ["userName", "User"],
-                  ["paymentDate", "Date"],
-                  ["method", "Method"],
-                  ["amountUsd", "USD"],
-                  ["rateBdt", "Rate"],
-                  ["amountBdt", "BDT"],
-                  ["status", "Status"],
-                ] as const
-              ).map(([key, label]) => (
-                <TableHead key={key}>
-                  <button
-                    type="button"
-                    className="font-medium"
-                    onClick={() => {
-                      if (!["paymentDate", "amountUsd", "amountBdt", "status"].includes(key)) return;
-                      setSortDir(sortBy === key && sortDir === "desc" ? "asc" : "desc");
-                      setSortBy(key);
-                      setPage(1);
-                    }}
-                  >
-                    {label}
-                    {sortBy === key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
-                  </button>
-                </TableHead>
-              ))}
-              <TableHead>Paid by</TableHead>
-              <TableHead>Paid at</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {loading && (
-              <TableRow>
-                <TableCell colSpan={11} className="text-muted-foreground">
-                  Loading payments...
-                </TableCell>
-              </TableRow>
-            )}
-            {!loading && data?.payments.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={11} className="text-muted-foreground">
-                  No payments match these filters.
-                </TableCell>
-              </TableRow>
-            )}
-            {!loading &&
-              data?.payments.map((payment) => (
-                <TableRow key={payment.id}>
-                  <TableCell>
-                    <input
-                      type="checkbox"
-                      aria-label={`Select payment for ${payment.userName}`}
-                      checked={selected.includes(payment.id)}
-                      onChange={(event) =>
-                        setSelected((current) =>
-                          event.target.checked ? [...current, payment.id] : current.filter((id) => id !== payment.id),
-                        )
-                      }
-                    />
-                  </TableCell>
-                  <TableCell>{payment.userName}</TableCell>
-                  <TableCell>{new Date(payment.paymentDate).toLocaleDateString()}</TableCell>
-                  <TableCell>{METHOD_LABELS[payment.method]}</TableCell>
-                  <TableCell>{usd(payment.amountUsd)}</TableCell>
-                  <TableCell>{payment.rateBdt}</TableCell>
-                  <TableCell>{bdt(payment.amountBdt)}</TableCell>
-                  <TableCell>
-                    <Badge variant={payment.status === "paid" ? "secondary" : "outline"}>
-                      {payment.status === "paid" ? "Paid" : "Unpaid"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>{payment.paidByName ?? "—"}</TableCell>
-                  <TableCell>{when(payment.paidAt)}</TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      <Button size="sm" variant="ghost" onClick={() => openEdit(payment)}>
-                        Edit
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => mark(payment.id, payment.status !== "paid")}>
-                        {payment.status === "paid" ? "Mark unpaid" : "Mark paid"}
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => remove(payment)}>
-                        Delete
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-          </TableBody>
-        </Table>
-      </div>
-
-      {footer && (
-        <div className="grid gap-3 text-sm sm:grid-cols-4">
-          <p>Total USD <span className="block font-medium">{usd(footer.totalUsd)}</span></p>
-          <p>Total BDT <span className="block font-medium">{bdt(footer.totalBdt)}</span></p>
-          <p>
-            Paid <span className="block font-medium">{usd(footer.paidUsd)} · {bdt(footer.paidBdt)}</span>
-          </p>
-          <p>
-            Unpaid <span className="block font-medium">{usd(footer.unpaidUsd)} · {bdt(footer.unpaidBdt)}</span>
-          </p>
+      {selected.length > 0 && (
+        <div className="fixed inset-x-0 bottom-4 z-30 mx-auto flex w-[min(920px,calc(100%-2rem))] flex-wrap items-center justify-between gap-3 rounded-2xl bg-[#1e1b4b] px-4 py-3 text-[13px] text-white shadow-xl">
+          <p><span className="font-semibold">{selected.length} payment{selected.length === 1 ? "" : "s"} selected</span><span className="ml-3 text-white/80">Aggregated {usd(selectedUsd.toFixed(2))} • {bdt(selectedBdt.toFixed(2))}</span></p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="rounded-lg bg-[#006e2d] px-3 py-1.5 font-semibold" onClick={() => void bulkPaid()}>Mark as paid</button>
+            <button type="button" className="rounded-lg bg-white/10 px-3 py-1.5 font-semibold" onClick={() => void bulkUnpaid()}>Mark as unpaid</button>
+            <button type="button" className="rounded-lg bg-white/10 px-3 py-1.5" onClick={() => toast.message("Batch receipts are not on this ledger yet.")}>Batch receipt</button>
+            <button type="button" className="rounded-lg px-3 py-1.5 text-white/80" onClick={() => setSelected([])}>Clear selection</button>
+          </div>
         </div>
       )}
 
-      <div className="flex items-center justify-between text-sm">
-        <p className="text-muted-foreground">{data ? `${data.total} payment${data.total === 1 ? "" : "s"}` : ""}</p>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>
-            Previous
-          </Button>
-          <span>
-            Page {data?.page ?? page} of {data?.totalPages ?? 1}
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!data || page >= data.totalPages}
-            onClick={() => setPage((current) => current + 1)}
-          >
-            Next
-          </Button>
-        </div>
-      </div>
-
-      <Dialog open={dialog !== null} onOpenChange={(open) => !open && closeDialog()}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{editing ? "Edit payment" : "Add payment"}</DialogTitle>
-            <DialogDescription>
-              {lockedMoney
-                ? "This payment is paid. Mark it unpaid before changing the USD amount or rate."
-                : "The BDT amount is calculated when the payment is saved."}
-            </DialogDescription>
-          </DialogHeader>
-          <form onSubmit={submitPayment} className="flex flex-col gap-4">
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="pay-user">User</FieldLabel>
-                <select
-                  id="pay-user"
-                  name="userId"
-                  defaultValue={editing?.userId ?? ""}
-                  className="h-8 rounded-lg border bg-background px-2 text-sm"
-                  required
-                >
-                  <option value="">Choose a user</option>
-                  {users.map((user) => (
-                    <option key={user.id} value={user.id}>
-                      {user.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="pay-method">Method</FieldLabel>
-                <select
-                  id="pay-method"
-                  name="method"
-                  defaultValue={editing?.method ?? "cashapp"}
-                  className="h-8 rounded-lg border bg-background px-2 text-sm"
-                >
-                  {PAYMENT_METHODS.map((method) => (
-                    <option key={method} value={method}>
-                      {METHOD_LABELS[method]}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="pay-usd">USD</FieldLabel>
-                <Input
-                  id="pay-usd"
-                  name="amountUsd"
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  defaultValue={editing?.amountUsd}
-                  disabled={lockedMoney}
-                  onChange={(event) => setDraftUsd(event.target.value)}
-                  required
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="pay-rate">BDT rate</FieldLabel>
-                <Input
-                  id="pay-rate"
-                  name="rateBdt"
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  defaultValue={editing?.rateBdt}
-                  disabled={lockedMoney}
-                  onChange={(event) => setDraftRate(event.target.value)}
-                  required
-                />
-              </Field>
-              <p className="text-sm text-muted-foreground">BDT preview {previewBdt(draftUsd, draftRate)}</p>
-              <Field>
-                <FieldLabel htmlFor="pay-date">Payment date</FieldLabel>
-                <Input
-                  id="pay-date"
-                  name="paymentDate"
-                  type="date"
-                  defaultValue={editing ? dayValue(editing.paymentDate) : dayValue(new Date().toISOString())}
-                  required
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="pay-note">Note</FieldLabel>
-                <Input id="pay-note" name="note" defaultValue={editing?.note ?? ""} />
-              </Field>
-              <FieldError>{formError}</FieldError>
-            </FieldGroup>
-            <DialogFooter>
-              <Button type="submit" disabled={pending}>
-                {pending ? "Saving..." : editing ? "Save changes" : "Add payment"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-    </section>
+      <PaymentEntryDialog
+        open={dialog !== null}
+        users={users}
+        editing={editing}
+        pending={pending}
+        formError={formError}
+        onClose={closeDialog}
+        onSubmit={(values) => void submitPayment(values)}
+        onMarkUnpaid={editing ? () => { closeDialog(); void mark(editing.id, false); } : undefined}
+      />
+    </div>
   );
 }

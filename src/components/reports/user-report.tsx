@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { PaymentEntryDialog, type PaymentEntryValues } from "@/components/payment-entry-dialog";
 import { formatBdt, formatUsd } from "@/lib/money";
 import { METHOD_LABELS, PAYMENT_METHODS } from "@/lib/validations/payment";
 
@@ -82,17 +83,6 @@ const share = (part: string, total: string) => {
   return new Decimal(part || 0).div(whole).mul(100).toFixed(1);
 };
 
-const previewBdt = (usd: string, rate: string) => {
-  try {
-    const amount = new Decimal(usd);
-    const fx = new Decimal(rate);
-    if (!amount.gt(0) || !fx.gt(0)) return "৳0.00";
-    return formatBdt(amount.toDecimalPlaces(2).mul(fx.toDecimalPlaces(2)).toDecimalPlaces(2).toFixed(2));
-  } catch {
-    return "৳0.00";
-  }
-};
-
 export function UserReport({ user }: { user: ManagedUser }) {
   const [profile, setProfile] = useState(user);
   const [period, setPeriod] = useState<Period>("monthly");
@@ -116,8 +106,6 @@ export function UserReport({ user }: { user: ManagedUser }) {
   const [deleteTarget, setDeleteTarget] = useState<HistoryRow | null>(null);
   const [pending, setPending] = useState(false);
   const [formError, setFormError] = useState("");
-  const [draftUsd, setDraftUsd] = useState("");
-  const [draftRate, setDraftRate] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -240,21 +228,17 @@ export function UserReport({ user }: { user: ManagedUser }) {
     setDialog(null);
   };
 
-  const submitPayment = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const markNow = form.get("initialStatus") === "paid";
+  const submitPayment = async (values: PaymentEntryValues) => {
+    const markNow = !editing && values.initialStatus === "paid";
     setPending(true);
     const payload: Record<string, string> = {
       userId: profile.id,
-      method: String(form.get("method") ?? ""),
-      paymentDate: String(form.get("paymentDate") ?? ""),
-      note: String(form.get("note") ?? ""),
+      method: values.method,
+      paymentDate: values.paymentDate,
+      note: values.note,
+      amountUsd: values.amountUsd,
+      rateBdt: values.rateBdt,
     };
-    const amountUsd = form.get("amountUsd");
-    const rateBdt = form.get("rateBdt");
-    if (amountUsd) payload.amountUsd = String(amountUsd);
-    if (rateBdt) payload.rateBdt = String(rateBdt);
     const response = await fetch(editing ? `/api/payments/${editing.id}` : "/api/payments", {
       method: editing ? "PATCH" : "POST",
       headers: { "content-type": "application/json" },
@@ -311,8 +295,6 @@ export function UserReport({ user }: { user: ManagedUser }) {
 
   const openPayment = (row?: HistoryRow) => {
     setFormError("");
-    setDraftUsd(row?.amountUsd ?? "");
-    setDraftRate(row?.rateBdt ?? "");
     setRowMenu(null);
     setDialog(row ?? "payment");
   };
@@ -604,55 +586,18 @@ export function UserReport({ user }: { user: ManagedUser }) {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={dialog === "payment" || editing !== null} onOpenChange={(open) => !open && setDialog(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{editing ? "Edit payment" : "Add payment entry"}</DialogTitle>
-            <DialogDescription>{profile.name} · USR-{shortId(profile.id)}</DialogDescription>
-          </DialogHeader>
-          <form onSubmit={submitPayment} className="flex flex-col gap-4">
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="pay-method">Method</FieldLabel>
-                <select id="pay-method" name="method" defaultValue={editing?.method ?? "cashapp"} className="h-9 rounded-lg border border-[#c7c4d7] bg-white px-2 text-sm">
-                  {PAYMENT_METHODS.map((method) => <option key={method} value={method}>{METHOD_LABELS[method]}</option>)}
-                </select>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="pay-usd">USD principal amount</FieldLabel>
-                <Input id="pay-usd" name="amountUsd" defaultValue={editing?.amountUsd} disabled={editing?.status === "paid"} onChange={(event) => setDraftUsd(event.target.value)} required />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="pay-rate">Corridor FX rate</FieldLabel>
-                <Input id="pay-rate" name="rateBdt" defaultValue={editing?.rateBdt} disabled={editing?.status === "paid"} onChange={(event) => setDraftRate(event.target.value)} required />
-              </Field>
-              <p className="text-sm text-[#464555]">Calculated BDT settlement {previewBdt(draftUsd || editing?.amountUsd || "", draftRate || editing?.rateBdt || "")}</p>
-              <Field>
-                <FieldLabel htmlFor="pay-date">Payment date</FieldLabel>
-                <Input id="pay-date" name="paymentDate" type="date" defaultValue={(editing ? editing.paymentDate : new Date().toISOString()).slice(0, 10)} required />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="pay-note">Settlement note</FieldLabel>
-                <Input id="pay-note" name="note" defaultValue={editing?.note ?? ""} />
-              </Field>
-              {!editing && (
-                <Field>
-                  <FieldLabel htmlFor="pay-status">Initial status</FieldLabel>
-                  <select id="pay-status" name="initialStatus" defaultValue="unpaid" className="h-9 rounded-lg border border-[#c7c4d7] bg-white px-2 text-sm">
-                    <option value="unpaid">Queue as unpaid</option>
-                    <option value="paid">Mark paid immediately</option>
-                  </select>
-                </Field>
-              )}
-              <FieldError>{formError}</FieldError>
-            </FieldGroup>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setDialog(null)}>Cancel</Button>
-              <Button type="submit" disabled={pending}>{pending ? "Saving..." : editing ? "Save changes" : "Commit to ledger"}</Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      <PaymentEntryDialog
+        open={dialog === "payment" || editing !== null}
+        users={[{ id: profile.id, name: profile.name }]}
+        fixedUser={{ id: profile.id, name: profile.name }}
+        editing={editing ? { ...editing, userId: profile.id, userName: profile.name } : null}
+        allowInitialStatus
+        pending={pending}
+        formError={formError}
+        onClose={() => setDialog(null)}
+        onSubmit={(values) => void submitPayment(values)}
+        onMarkUnpaid={editing ? () => { setDialog(null); void mark(editing.id, false); } : undefined}
+      />
 
       <Dialog open={dialog === "export"} onOpenChange={(open) => !open && setDialog(null)}>
         <DialogContent>
