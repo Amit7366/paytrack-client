@@ -109,6 +109,9 @@ export function AdminDesk({ operator }: { operator: string }) {
 
   const settled = percent(totals.paidBdt, totals.totalBdt);
   const pipeline = percent(totals.unpaidBdt, totals.totalBdt);
+  const halfCleared = (amount: string) => new Decimal(amount || 0).mul("0.5").toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toFixed(2);
+  const adminGetsBdt = halfCleared(totals.paidBdt);
+  const adminGetsUsd = halfCleared(totals.paidUsd);
   const averageTicket = totals.paymentCount
     ? formatUsd(new Decimal(totals.totalUsd).div(totals.paymentCount).toFixed(2))
     : "$0.00";
@@ -194,10 +197,11 @@ export function AdminDesk({ operator }: { operator: string }) {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-6">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Metric label="Total Volume USD" value={loading ? "…" : formatUsd(totals.totalUsd)} hint={`Avg ${averageTicket} / Txn`} pill="+14.2% MoM" pillClass="bg-[#7cf994]/30 text-[#006e2d]" />
           <Metric label="Total Volume BDT" value={loading ? "…" : formatBdt(totals.totalBdt)} hint="Gross desk volume" pill="Pegged FX Settlement" pillClass="bg-[#7cf994]/30 text-[#006e2d]" />
           <Metric label="Cleared (Paid)" value={loading ? "…" : formatBdt(totals.paidBdt)} hint={`${totals.paidCount} Disbursements Cleared`} pill={`${settled}% Settled`} pillClass="bg-[#7cf994]/30 text-[#006e2d]" valueClass="text-[#006e2d]" />
+          <Metric label="Admin Share" value={loading ? "…" : formatBdt(adminGetsBdt)} hint={`${formatUsd(adminGetsUsd)} · 50% of cleared`} pill="50% of paid BDT" pillClass="bg-[#e2dfff] text-[#3525cd]" valueClass="text-[#3525cd]" />
           <Metric label="Pending (Unpaid)" value={loading ? "…" : formatBdt(totals.unpaidBdt)} hint={`${totals.unpaidCount} Batches Awaiting Proof`} pill={`${pipeline}% In Pipeline`} pillClass="bg-[#ffddb8] text-[#684000]" valueClass="text-[#684000]" />
           <Metric label="Total Txn Count" value={loading ? "…" : `${totals.paymentCount} Txns`} hint={`${totals.paidCount} Paid • ${totals.unpaidCount} Pending`} pill="98.2% SLA Met" pillClass="bg-[#e2dfff] text-[#3525cd]" />
           <Metric label="Desk Avg FX Rate" value={loading ? "…" : `৳${new Decimal(totals.averageRate || 0).toFixed(2)}`} hint="Per 1.00 USD Realized" pill="+৳0.35 Spread (+0.29%)" pillClass="bg-[#7cf994]/30 text-[#006e2d]" />
